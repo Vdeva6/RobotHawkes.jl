@@ -10,14 +10,8 @@ Inputs:
 Output:
 - tensor with shape `(embed_dim, T, B)`
 
-For query time `t` attending to source time `s`, where `s ≤ t`:
-
-    score(t, s, h) =
-        dot(q[t, h], k[s, h]) / sqrt(head_dim) *
-        exp(-abs(decay[h]) * (times[t] - times[s]))
-
-This is a first correct, type-stable implementation. It prioritizes clarity.
-Later phases will optimize allocations and explore fused kernels.
+This implementation avoids array mutation so that Zygote can differentiate
+through the attention computation.
 """
 struct TransformerHawkesCell{T<:AbstractFloat} <: Lux.AbstractLuxLayer
     embed_dim::Int
@@ -72,6 +66,53 @@ function _linear_project(W, b, x::AbstractArray{<:AbstractFloat, 3})
     return reshape(y2, E, T_seq, B)
 end
 
+function _hawkes_head_attention(
+    layer::TransformerHawkesCell,
+    q,
+    k,
+    v,
+    times,
+    decay_h,
+    b::Integer,
+    h::Integer,
+)
+    D = layer.head_dim
+    offset = (h - 1) * D
+    T_seq = size(q, 2)
+
+    S = promote_type(eltype(q), eltype(times), eltype(decay_h))
+    scale = inv(sqrt(S(D)))
+    decay_abs = abs(S(decay_h))
+
+    cols = map(1:T_seq) do t
+        scores = map(1:t) do s
+            dot_qk = sum(
+                S(q[offset + d, t, b]) * S(k[offset + d, s, b])
+                for d in 1:D
+            )
+
+            Δ = max(S(times[t, b] - times[s, b]), zero(S))
+            hawkes_mask = exp(-decay_abs * Δ)
+
+            dot_qk * scale * hawkes_mask
+        end
+
+        max_score = maximum(scores)
+        weights_unnorm = exp.(scores .- max_score)
+        weights = weights_unnorm ./ sum(weights_unnorm)
+
+        [
+            sum(
+                weights[s] * S(v[offset + d, s, b])
+                for s in 1:t
+            )
+            for d in 1:D
+        ]
+    end
+
+    return hcat(cols...)
+end
+
 function (layer::TransformerHawkesCell)(
     x::AbstractArray{<:AbstractFloat, 3},
     times::AbstractMatrix{<:AbstractFloat},
@@ -87,62 +128,20 @@ function (layer::TransformerHawkesCell)(
         throw(DimensionMismatch("times must have shape (T, B) matching x"))
 
     H = layer.num_heads
-    D = layer.head_dim
 
     q = _linear_project(ps.Wq, ps.bq, x)
     k = _linear_project(ps.Wk, ps.bk, x)
     v = _linear_project(ps.Wv, ps.bv, x)
 
-    S = promote_type(eltype(x), eltype(times), eltype(ps.Wq))
-
-    y_heads = similar(x, S, E, T_seq, B)
-
-    scale = inv(sqrt(S(D)))
-
-    @inbounds for b in 1:B
-        for h in 1:H
-            offset = (h - 1) * D
-            decay_h = abs(S(ps.decay[h]))
-
-            for t in 1:T_seq
-                scores = Vector{S}(undef, t)
-
-                for s in 1:t
-                    dot_qk = zero(S)
-
-                    for d in 1:D
-                        idx = offset + d
-                        dot_qk += S(q[idx, t, b]) * S(k[idx, s, b])
-                    end
-
-                    Δ = max(S(times[t, b] - times[s, b]), zero(S))
-                    hawkes_mask = exp(-decay_h * Δ)
-
-                    scores[s] = dot_qk * scale * hawkes_mask
-                end
-
-                max_score = maximum(scores)
-
-                denom = zero(S)
-                for s in 1:t
-                    scores[s] = exp(scores[s] - max_score)
-                    denom += scores[s]
-                end
-
-                for d in 1:D
-                    idx = offset + d
-                    acc = zero(S)
-
-                    for s in 1:t
-                        α = scores[s] / denom
-                        acc += α * S(v[idx, s, b])
-                    end
-
-                    y_heads[idx, t, b] = acc
-                end
-            end
+    batches = map(1:B) do b
+        heads = map(1:H) do h
+            _hawkes_head_attention(layer, q, k, v, times, ps.decay[h], b, h)
         end
+
+        reduce(vcat, heads)
     end
+
+    y_heads = cat(batches...; dims=3)
 
     y = _linear_project(ps.Wo, ps.bo, y_heads)
 

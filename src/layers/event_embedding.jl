@@ -4,16 +4,10 @@
 Learnable embedding table for discrete event types.
 
 Input:
-- `event_ids` with shape `(T, B)` where:
-  - `T` = sequence length
-  - `B` = batch size
-  - each value is an integer event id in `1:num_events`
+- `event_ids` with shape `(T, B)`
 
 Output:
 - tensor with shape `(embed_dim, T, B)`
-
-This layer represents the discrete identity of each event, while
-`TemporalEmbedding` represents the continuous time gap between events.
 """
 struct EventEmbedding{T<:AbstractFloat} <: Lux.AbstractLuxLayer
     num_events::Int
@@ -49,20 +43,15 @@ function (layer::EventEmbedding)(event_ids::AbstractMatrix{<:Integer}, ps, st::N
     size(ps.table, 2) == layer.num_events ||
         throw(DimensionMismatch("embedding table has wrong num_events"))
 
-    y = similar(ps.table, layer.embed_dim, T_seq, B)
+    minimum(event_ids) >= 1 ||
+        throw(ArgumentError("event ids must be >= 1"))
 
-    @inbounds for b in axes(event_ids, 2)
-        for t in axes(event_ids, 1)
-            event_id = event_ids[t, b]
+    maximum(event_ids) <= layer.num_events ||
+        throw(ArgumentError("event ids must be <= $(layer.num_events)"))
 
-            1 <= event_id <= layer.num_events ||
-                throw(ArgumentError("event id $event_id is outside 1:$(layer.num_events)"))
-
-            for d in axes(ps.table, 1)
-                y[d, t, b] = ps.table[d, event_id]
-            end
-        end
-    end
+    # ps.table[:, vec(event_ids)] gives shape (embed_dim, T * B)
+    # reshape restores our standard layout: (embed_dim, T, B)
+    y = reshape(ps.table[:, vec(event_ids)], layer.embed_dim, T_seq, B)
 
     return y, st
 end
