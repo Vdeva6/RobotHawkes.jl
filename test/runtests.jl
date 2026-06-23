@@ -76,4 +76,35 @@ using RobotHawkes
 
         @test_throws ArgumentError TransformerHawkesCell(15, 4)
     end
+
+    @testset "TransformerHawkesModel" begin
+        rng = Xoshiro(2024)
+
+        num_events = 6
+        embed_dim = 16
+        num_heads = 4
+        T_seq = 9
+        B = 2
+
+        model = TransformerHawkesModel(num_events, embed_dim, num_heads)
+        ps, st = Lux.setup(rng, model)
+
+        event_ids = rand(1:num_events, T_seq, B)
+        Δt = rand(Float32, T_seq, B)
+
+        λ, st_new = model(event_ids, Δt, ps, st)
+
+        @test size(λ) == (num_events, T_seq, B)
+        @test st_new == st
+        @test eltype(λ) == Float32
+        @test all(λ .> 0)
+
+        @test haskey(ps, :event)
+        @test haskey(ps, :time)
+        @test haskey(ps, :cell)
+        @test haskey(ps, :Wλ)
+        @test haskey(ps, :bλ)
+
+        @test_throws ArgumentError TransformerHawkesModel(num_events, 15, 4)
+    end
 end

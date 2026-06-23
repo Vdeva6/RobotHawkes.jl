@@ -22,6 +22,9 @@ event_ps, event_st = Lux.setup(rng, event_layer)
 cell = TransformerHawkesCell(embed_dim, num_heads)
 cell_ps, cell_st = Lux.setup(rng, cell)
 
+model = TransformerHawkesModel(num_events, embed_dim, num_heads)
+model_ps, model_st = Lux.setup(rng, model)
+
 Δt = rand(Float32, T_seq, B)
 times = cumsum(Δt; dims=1)
 event_ids = rand(1:num_events, T_seq, B)
@@ -49,3 +52,7 @@ end
 println()
 println("Benchmarking TransformerHawkesCell forward pass...")
 @btime $cell($x, $times, $cell_ps, $cell_st)
+
+println()
+println("Benchmarking full TransformerHawkesModel forward pass...")
+@btime $model($event_ids, $Δt, $model_ps, $model_st)
