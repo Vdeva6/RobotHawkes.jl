@@ -25,7 +25,7 @@ function make_problem(;
     return model, ps, st, event_ids, Δt
 end
 
-function build_suite!()
+function build_suite!(mode::String)
     model, ps, st, event_ids, Δt = make_problem()
 
     SUITE["forward"] = @benchmarkable $model($event_ids, $Δt, $ps, $st)
@@ -38,17 +38,27 @@ function build_suite!()
         model_full_hawkes_nll($model, $event_ids, $Δt, $ps, $st)
     end
 
-    SUITE["observed_nll_gradient"] = @benchmarkable begin
-        Zygote.gradient($ps) do p
-            first(model_observed_nll($model, $event_ids, $Δt, p, $st))
+    if mode == "grad"
+        SUITE["observed_nll_gradient"] = @benchmarkable begin
+            Zygote.gradient($ps) do p
+                first(model_observed_nll($model, $event_ids, $Δt, p, $st))
+            end
         end
-    end
+    elseif mode == "fullgrad"
+        SUITE["observed_nll_gradient"] = @benchmarkable begin
+            Zygote.gradient($ps) do p
+                first(model_observed_nll($model, $event_ids, $Δt, p, $st))
+            end
+        end
 
-    #SUITE["full_hawkes_nll_gradient"] = @benchmarkable begin
-        #Zygote.gradient($ps) do p
-            #first(model_full_hawkes_nll($model, $event_ids, $Δt, p, $st))
-        #end
-    #end
+        SUITE["full_hawkes_nll_gradient"] = @benchmarkable begin
+            Zygote.gradient($ps) do p
+                first(model_full_hawkes_nll($model, $event_ids, $Δt, p, $st))
+            end
+        end
+    elseif mode != "quick"
+        throw(ArgumentError("unknown benchmark mode: $mode. Use quick, grad, or fullgrad."))
+    end
 
     return SUITE
 end
@@ -65,10 +75,13 @@ function print_trial_summary(name, trial)
 end
 
 function main()
+    mode = get(ARGS, 1, "quick")
+
     println("RobotHawkes benchmark suite")
     println("===========================")
+    println("Mode: $mode")
 
-    suite = build_suite!()
+    suite = build_suite!(mode)
 
     println()
     println("Tuning benchmarks...")
@@ -76,7 +89,7 @@ function main()
 
     println()
     println("Running benchmarks...")
-    results = run(suite; verbose=true)
+    results = run(suite; seconds=1, samples=3, evals=1, verbose=true)
 
     for name in sort(collect(keys(results)))
         print_trial_summary(name, results[name])
