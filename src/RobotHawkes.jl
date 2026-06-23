@@ -4,6 +4,7 @@ using Lux
 using Random
 using NNlib
 using Integrals
+using ChainRulesCore
 
 include("layers/temporal_embedding.jl")
 include("layers/event_embedding.jl")
