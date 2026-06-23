@@ -236,13 +236,4 @@ using RobotHawkes
 
         @test val ≈ 1 / 3 atol = 1e-5
     end
-    println()
-    println("Benchmarking full Hawkes NLL...")
-    @btime $model_full_hawkes_nll($model, $event_ids, $Δt, $model_ps, $model_st)
-
-    println()
-    println("Benchmarking Zygote gradient of full Hawkes NLL...")
-    @btime Zygote.gradient($model_ps) do p
-    first($model_full_hawkes_nll($model, $event_ids, $Δt, p, $model_st))
-    end
 end
