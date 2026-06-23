@@ -223,7 +223,6 @@ end
 
 
 
-#=
 function ChainRulesCore.rrule(
     ::typeof(_hawkes_attention),
     qh,
@@ -235,50 +234,26 @@ function ChainRulesCore.rrule(
     # Forward pass.
     yh = _hawkes_attention(qh, kh, vh, times, decay)
 
-    # Capture projection helpers outside the pullback.
-    # ChainRulesCore.ProjectTo is important because AD systems may pass tangent
-    # objects that need to be projected back into the primal array structure.
     project_qh = ChainRulesCore.ProjectTo(qh)
     project_kh = ChainRulesCore.ProjectTo(kh)
     project_vh = ChainRulesCore.ProjectTo(vh)
-    project_times = ChainRulesCore.ProjectTo(times)
     project_decay = ChainRulesCore.ProjectTo(decay)
 
-    function hawkes_attention_pullback(ȳh)
-        # TODO:
-        # Derive and implement:
-        #
-        # Forward:
-        #   content = KᵀQ / sqrt(D)
-        #   logits = content - abs(decay[h]) * Δt + causal
-        #   weights = softmax(logits; dims=source_time)
-        #   yh = V * weights
-        #
-        # Backward:
-        #   ȳh       -> gradients wrt V and weights
-        #   weights̄  -> gradients wrt logits via softmax Jacobian-vector product
-        #   logits̄   -> gradients wrt Q, K, decay, and possibly times
-        #
-        # Return structure:
-        #   NoTangent() for the function itself
-        #   q̄h
-        #   k̄h
-        #   v̄h
-        #   t̄imes
-        #   d̄ecay
-        #
-        # For first production version, we may return NoTangent() for `times`
-        # if we choose not to train through event timestamps.
+    function hawkes_attention_pullback(ybar)
+        ybar_unthunked = ChainRulesCore.unthunk(ybar)
+
+        qbar, kbar, vbar, decaybar =
+            _hawkes_attention_backward(qh, kh, vh, times, decay, ybar_unthunked)
+
         return (
-            ChainRulesCore.NoTangent(),
-            ChainRulesCore.@not_implemented("custom qh tangent not implemented"),
-            ChainRulesCore.@not_implemented("custom kh tangent not implemented"),
-            ChainRulesCore.@not_implemented("custom vh tangent not implemented"),
-            ChainRulesCore.@not_implemented("custom times tangent not implemented"),
-            ChainRulesCore.@not_implemented("custom decay tangent not implemented"),
+            ChainRulesCore.NoTangent(),      # function object
+            project_qh(qbar),
+            project_kh(kbar),
+            project_vh(vbar),
+            ChainRulesCore.NoTangent(),      # times treated as observed data
+            project_decay(decaybar),
         )
     end
 
     return yh, hawkes_attention_pullback
 end
-=#
