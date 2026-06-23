@@ -239,4 +239,5 @@ using RobotHawkes
     include("layers/test_transformer_hawkes_cell.jl")
     include("layers/test_hawkes_attention_reference.jl")
     include("layers/test_hawkes_attention_gradients.jl")
+    include("layers/test_hawkes_attention_manual_backward.jl")
 end

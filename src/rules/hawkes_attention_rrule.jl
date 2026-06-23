@@ -18,6 +18,211 @@
 #
 # Do NOT uncomment this until the custom pullback is fully implemented and tested.
 
+
+"""
+    _hawkes_attention_backward(qh, kh, vh, times, decay, ybar)
+
+Manual reverse pass for `_hawkes_attention`.
+
+Inputs:
+- `qh`, `kh`, `vh`: `(D, T, H, B)`
+- `times`: `(T, B)`
+- `decay`: `(H,)`
+- `ybar`: upstream sensitivity with shape `(D, T, H, B)`
+
+Returns:
+- `qbar`
+- `kbar`
+- `vbar`
+- `decaybar`
+
+This helper is not yet registered as a ChainRulesCore `rrule`.
+It exists so we can validate the backward math against finite differences
+before overriding Zygote's default reverse pass.
+"""
+function _hawkes_attention_backward(qh, kh, vh, times, decay, ybar)
+    _validate_attention_inputs(qh, kh, vh, times, decay)
+
+    size(ybar) == size(qh) ||
+        throw(DimensionMismatch("ybar must have the same shape as qh/kh/vh"))
+
+    D, T_seq, H, B = size(qh)
+
+    S = promote_type(
+        eltype(qh),
+        eltype(kh),
+        eltype(vh),
+        eltype(times),
+        eltype(decay),
+        eltype(ybar),
+    )
+
+    qbar = zeros(S, size(qh))
+    kbar = zeros(S, size(kh))
+    vbar = zeros(S, size(vh))
+    decaybar = zeros(S, size(decay))
+
+    scale = inv(sqrt(S(D)))
+
+    @inbounds for b in 1:B
+        for h in 1:H
+            decay_h = S(decay[h])
+            abs_decay_h = abs(decay_h)
+            decay_sign = sign(decay_h)
+
+            # Forward recomputation for this (head, batch) block.
+            #
+            # W[s, t] is the attention weight from source s to target t.
+            # Only s <= t is valid because of causal masking.
+            W = zeros(S, T_seq, T_seq)
+
+            for t in 1:T_seq
+                scores = Vector{S}(undef, t)
+
+                for s in 1:t
+                    dot_qk = zero(S)
+
+                    for d in 1:D
+                        dot_qk += S(kh[d, s, h, b]) * S(qh[d, t, h, b])
+                    end
+
+                    Δ = max(S(times[t, b] - times[s, b]), zero(S))
+
+                    scores[s] = dot_qk * scale - abs_decay_h * Δ
+                end
+
+                max_score = maximum(scores)
+
+                denom = zero(S)
+                for s in 1:t
+                    scores[s] = exp(scores[s] - max_score)
+                    denom += scores[s]
+                end
+
+                for s in 1:t
+                    W[s, t] = scores[s] / denom
+                end
+            end
+
+            # Backprop through:
+            #
+            #     Y = V * W
+            #
+            # Reverse:
+            #
+            #     Vbar = Ybar * W'
+            #     Wbar = V' * Ybar
+
+            Wbar = zeros(S, T_seq, T_seq)
+
+            for d in 1:D
+                for s in 1:T_seq
+                    acc_v = zero(S)
+
+                    for t in 1:T_seq
+                        acc_v += S(ybar[d, t, h, b]) * W[s, t]
+                    end
+
+                    vbar[d, s, h, b] += acc_v
+                end
+            end
+
+            for s in 1:T_seq
+                for t in 1:T_seq
+                    acc_w = zero(S)
+
+                    for d in 1:D
+                        acc_w += S(vh[d, s, h, b]) * S(ybar[d, t, h, b])
+                    end
+
+                    Wbar[s, t] = acc_w
+                end
+            end
+
+            # Backprop through softmax over source positions for each target t:
+            #
+            #     Lbar[:, t] = W[:, t] .* (Wbar[:, t] .- dot(W[:, t], Wbar[:, t]))
+            #
+            # Only causal positions s <= t participate.
+
+            Lbar = zeros(S, T_seq, T_seq)
+
+            for t in 1:T_seq
+                dot_term = zero(S)
+
+                for s in 1:t
+                    dot_term += W[s, t] * Wbar[s, t]
+                end
+
+                for s in 1:t
+                    Lbar[s, t] = W[s, t] * (Wbar[s, t] - dot_term)
+                end
+            end
+
+            # Backprop through:
+            #
+            #     L = K'Q / sqrt(D) - abs(decay[h]) * Δ + causal
+            #
+            # Cbar = Lbar
+            #
+            # Qbar = K * Cbar / sqrt(D)
+            # Kbar = Q * Cbar' / sqrt(D)
+
+            for d in 1:D
+                for t in 1:T_seq
+                    acc_q = zero(S)
+
+                    for s in 1:T_seq
+                        acc_q += S(kh[d, s, h, b]) * Lbar[s, t]
+                    end
+
+                    qbar[d, t, h, b] += acc_q * scale
+                end
+            end
+
+            for d in 1:D
+                for s in 1:T_seq
+                    acc_k = zero(S)
+
+                    for t in 1:T_seq
+                        acc_k += S(qh[d, t, h, b]) * Lbar[s, t]
+                    end
+
+                    kbar[d, s, h, b] += acc_k * scale
+                end
+            end
+
+            # Backprop through Hawkes log-domain decay:
+            #
+            #     L[s, t] = content[s, t] - abs(decay[h]) * Δ[s, t]
+            #
+            # dL / d abs_decay = -Δ
+            # d abs_decay / d decay = sign(decay), away from zero
+
+            acc_decay = zero(S)
+
+            for t in 1:T_seq
+                for s in 1:t
+                    Δ = max(S(times[t, b] - times[s, b]), zero(S))
+                    acc_decay += -Lbar[s, t] * Δ
+                end
+            end
+
+            decaybar[h] += acc_decay * decay_sign
+        end
+    end
+
+    return qbar, kbar, vbar, decaybar
+end
+
+
+
+
+
+
+
+
+
 #=
 function ChainRulesCore.rrule(
     ::typeof(_hawkes_attention),
