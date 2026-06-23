@@ -1,7 +1,7 @@
 """
     TransformerHawkesCell(embed_dim::Integer, num_heads::Integer; init_scale=0.02f0)
 
-Causal multi-head attention cell with a learnable continuous Hawkes time-decay mask.
+Causal multi-head attention cell with a learnable continuous Hawkes time-decay bias.
 
 Inputs:
 - `x` with shape `(embed_dim, T, B)`
@@ -10,8 +10,24 @@ Inputs:
 Output:
 - tensor with shape `(embed_dim, T, B)`
 
-This implementation uses batched matrix multiplication instead of constructing
-each attention head with nested `map`/`hcat`/`vcat` calls.
+This implementation uses batched matrix multiplication for attention.
+
+Scientific note:
+This cell uses a log-domain Hawkes attention bias:
+
+    score(s, t, h, b) =
+        dot(k[s], q[t]) / sqrt(head_dim)
+        - abs(decay[h]) * max(times[t, b] - times[s, b], 0)
+        + causal_mask(s, t)
+
+This differs from directly multiplying the raw dot-product score by
+`exp(-decay * Δt)`. Because softmax exponentiates logits internally, the
+additive formulation makes the attention probability proportional to:
+
+    exp(content_score) * exp(-decay * Δt)
+
+which is usually the more numerically stable and probabilistically natural
+way to incorporate Hawkes-style temporal decay into attention.
 """
 struct TransformerHawkesCell{T<:AbstractFloat} <: Lux.AbstractLuxLayer
     embed_dim::Int
@@ -145,26 +161,34 @@ function (layer::TransformerHawkesCell)(
     kt = permutedims(kn, (2, 1, 3))
     content_scores = NNlib.batched_mul(kt, qn) .* inv(sqrt(S(D)))
 
-    # Hawkes decay mask:
-    # Δ has shape (source_time, target_time, batch)
+        # Log-domain Hawkes decay bias:
+    #
+    # Instead of multiplying the raw dot-product score by exp(-decay * Δt),
+    # we subtract decay * Δt directly from the attention logits.
+    #
+    # Since softmax exponentiates logits, this makes attention weights
+    # proportional to:
+    #
+    #     exp(content_score) * exp(-decay * Δt)
+    #
+    # This is both more numerically stable and closer to the probabilistic
+    # Hawkes interpretation of temporal influence decay.
     Δ = _time_deltas(times, S)
 
     # Expand to (source_time, target_time, head, batch)
     Δ4 = reshape(Δ, T_seq, T_seq, 1, B)
     decay4 = reshape(abs.(S.(ps.decay)), 1, 1, H, 1)
 
-    hawkes_mask4 = exp.(-decay4 .* Δ4)
-
     # Collapse to match content_scores:
     # (T, T, H, B) -> (T, T, H * B)
-    hawkes_mask = reshape(hawkes_mask4, T_seq, T_seq, H * B)
+    hawkes_bias = reshape(decay4 .* Δ4, T_seq, T_seq, H * B)
 
     # Causal mask:
     causal = reshape(_causal_mask(T_seq, S), T_seq, T_seq, 1)
 
-    # Final attention scores:
-    # content is modulated by Hawkes decay, then future positions are masked.
-    scores = content_scores .* hawkes_mask .+ causal
+    # Final attention logits:
+    # content score plus log-domain Hawkes decay bias plus causal mask.
+    scores = content_scores .- hawkes_bias .+ causal
 
     # Softmax across source positions for each target position.
     weights = NNlib.softmax(scores; dims=1)
