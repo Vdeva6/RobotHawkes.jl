@@ -43,10 +43,37 @@ using RobotHawkes
         @test haskey(ps, :table)
         @test eltype(y) == Float32
 
-        # Check that the first output vector equals the table column
         @test y[:, 1, 1] == ps.table[:, 1]
-
-        # Check another event id lookup
         @test y[:, 5, 4] == ps.table[:, 1]
+    end
+
+    @testset "TransformerHawkesCell" begin
+        rng = Xoshiro(999)
+
+        embed_dim = 16
+        num_heads = 4
+        T_seq = 8
+        B = 3
+
+        layer = TransformerHawkesCell(embed_dim, num_heads)
+        ps, st = Lux.setup(rng, layer)
+
+        x = rand(Float32, embed_dim, T_seq, B)
+        Δt = rand(Float32, T_seq, B)
+        times = cumsum(Δt; dims=1)
+
+        y, st_new = layer(x, times, ps, st)
+
+        @test size(y) == (embed_dim, T_seq, B)
+        @test st_new == st
+        @test eltype(y) == Float32
+
+        @test haskey(ps, :Wq)
+        @test haskey(ps, :Wk)
+        @test haskey(ps, :Wv)
+        @test haskey(ps, :Wo)
+        @test haskey(ps, :decay)
+
+        @test_throws ArgumentError TransformerHawkesCell(15, 4)
     end
 end
