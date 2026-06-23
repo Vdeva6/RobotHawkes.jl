@@ -20,14 +20,14 @@ This cell uses a log-domain Hawkes attention bias:
         - abs(decay[h]) * max(times[t, b] - times[s, b], 0)
         + causal_mask(s, t)
 
-This differs from directly multiplying the raw dot-product score by
-`exp(-decay * Δt)`. Because softmax exponentiates logits internally, the
-additive formulation makes the attention probability proportional to:
+Because softmax exponentiates logits internally, the additive formulation makes
+the attention probability proportional to:
 
     exp(content_score) * exp(-decay * Δt)
 
-which is usually the more numerically stable and probabilistically natural
-way to incorporate Hawkes-style temporal decay into attention.
+This file intentionally isolates the core attention primitive in
+`_hawkes_attention(qh, kh, vh, times, decay)`. That function is the future
+target for a custom ChainRulesCore adjoint or an Enzyme-compatible kernel.
 """
 struct TransformerHawkesCell{T<:AbstractFloat} <: Lux.AbstractLuxLayer
     embed_dim::Int
@@ -122,6 +122,89 @@ function _time_deltas(times::AbstractMatrix{<:AbstractFloat}, ::Type{S}) where {
     ]
 end
 
+function _validate_attention_inputs(qh, kh, vh, times, decay)
+    size(qh) == size(kh) ||
+        throw(DimensionMismatch("qh and kh must have matching shape"))
+
+    size(qh) == size(vh) ||
+        throw(DimensionMismatch("qh and vh must have matching shape"))
+
+    _, T_seq, H, B = size(qh)
+
+    size(times) == (T_seq, B) ||
+        throw(DimensionMismatch("times must have shape (T, B) matching qh/kh/vh"))
+
+    length(decay) == H ||
+        throw(DimensionMismatch("decay must have length equal to num_heads"))
+
+    return nothing
+end
+
+function _content_attention_scores(qh, kh)
+    D, T_seq, H, B = size(qh)
+
+    qn = reshape(qh, D, T_seq, H * B)
+    kn = reshape(kh, D, T_seq, H * B)
+
+    # KᵀQ gives (source_time, target_time, head_batch)
+    kt = permutedims(kn, (2, 1, 3))
+
+    S = promote_type(eltype(qh), eltype(kh))
+    scale = inv(sqrt(S(D)))
+
+    return NNlib.batched_mul(kt, qn) .* scale
+end
+
+function _hawkes_log_bias(times, decay, H::Integer, ::Type{S}) where {S<:AbstractFloat}
+    T_seq, B = size(times)
+
+    Δ = _time_deltas(times, S)
+
+    # Expand to (source_time, target_time, head, batch)
+    Δ4 = reshape(Δ, T_seq, T_seq, 1, B)
+    decay4 = reshape(abs.(S.(decay)), 1, 1, H, 1)
+
+    # Collapse to (source_time, target_time, head * batch)
+    return reshape(decay4 .* Δ4, T_seq, T_seq, H * B)
+end
+
+function _causal_log_bias(T_seq::Integer, ::Type{S}) where {S<:AbstractFloat}
+    return reshape(_causal_mask(T_seq, S), T_seq, T_seq, 1)
+end
+
+function _apply_attention_weights(vh, weights)
+    D, T_seq, H, B = size(vh)
+
+    vn = reshape(vh, D, T_seq, H * B)
+
+    # V * attention_weights -> (D, T, H * B)
+    yn = NNlib.batched_mul(vn, weights)
+
+    # Restore to per-head representation.
+    return reshape(yn, D, T_seq, H, B)
+end
+
+function _hawkes_attention(qh, kh, vh, times, decay)
+    _validate_attention_inputs(qh, kh, vh, times, decay)
+
+    D, T_seq, H, B = size(qh)
+    S = promote_type(eltype(qh), eltype(kh), eltype(vh), eltype(times), eltype(decay))
+
+    content_scores = _content_attention_scores(qh, kh)
+    hawkes_bias = _hawkes_log_bias(times, decay, H, S)
+    causal_bias = _causal_log_bias(T_seq, S)
+
+    # Final attention logits:
+    #
+    #   logits = content - decay * Δt + causal_mask
+    #
+    # Softmax is applied over source positions.
+    scores = content_scores .- hawkes_bias .+ causal_bias
+    weights = NNlib.softmax(scores; dims=1)
+
+    return _apply_attention_weights(vh, weights)
+end
+
 function (layer::TransformerHawkesCell)(
     x::AbstractArray{<:AbstractFloat, 3},
     times::AbstractMatrix{<:AbstractFloat},
@@ -139,67 +222,16 @@ function (layer::TransformerHawkesCell)(
     H = layer.num_heads
     D = layer.head_dim
 
-    S = promote_type(eltype(x), eltype(times), eltype(ps.Wq))
-
     q = _linear_project(ps.Wq, ps.bq, x)
     k = _linear_project(ps.Wk, ps.bk, x)
     v = _linear_project(ps.Wv, ps.bv, x)
 
-    # (E, T, B) -> (D, T, H, B)
     qh = _split_heads(q, D, H)
     kh = _split_heads(k, D, H)
     vh = _split_heads(v, D, H)
 
-    # Collapse heads and batch into one batched dimension:
-    # (D, T, H, B) -> (D, T, H * B)
-    qn = reshape(qh, D, T_seq, H * B)
-    kn = reshape(kh, D, T_seq, H * B)
-    vn = reshape(vh, D, T_seq, H * B)
+    yh = _hawkes_attention(qh, kh, vh, times, ps.decay)
 
-    # Content attention:
-    # KᵀQ gives (source_time, target_time, head_batch)
-    kt = permutedims(kn, (2, 1, 3))
-    content_scores = NNlib.batched_mul(kt, qn) .* inv(sqrt(S(D)))
-
-        # Log-domain Hawkes decay bias:
-    #
-    # Instead of multiplying the raw dot-product score by exp(-decay * Δt),
-    # we subtract decay * Δt directly from the attention logits.
-    #
-    # Since softmax exponentiates logits, this makes attention weights
-    # proportional to:
-    #
-    #     exp(content_score) * exp(-decay * Δt)
-    #
-    # This is both more numerically stable and closer to the probabilistic
-    # Hawkes interpretation of temporal influence decay.
-    Δ = _time_deltas(times, S)
-
-    # Expand to (source_time, target_time, head, batch)
-    Δ4 = reshape(Δ, T_seq, T_seq, 1, B)
-    decay4 = reshape(abs.(S.(ps.decay)), 1, 1, H, 1)
-
-    # Collapse to match content_scores:
-    # (T, T, H, B) -> (T, T, H * B)
-    hawkes_bias = reshape(decay4 .* Δ4, T_seq, T_seq, H * B)
-
-    # Causal mask:
-    causal = reshape(_causal_mask(T_seq, S), T_seq, T_seq, 1)
-
-    # Final attention logits:
-    # content score plus log-domain Hawkes decay bias plus causal mask.
-    scores = content_scores .- hawkes_bias .+ causal
-
-    # Softmax across source positions for each target position.
-    weights = NNlib.softmax(scores; dims=1)
-
-    # Weighted value aggregation:
-    # V * attention_weights -> (D, T, H * B)
-    yn = NNlib.batched_mul(vn, weights)
-
-    # Restore shape:
-    # (D, T, H * B) -> (D, T, H, B) -> (E, T, B)
-    yh = reshape(yn, D, T_seq, H, B)
     y_heads = _merge_heads(yh)
 
     y = _linear_project(ps.Wo, ps.bo, y_heads)
