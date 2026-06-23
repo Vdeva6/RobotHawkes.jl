@@ -5,18 +5,9 @@ using Zygote
 using RobotHawkes
 
 const PRESETS = Dict(
-    "small" => (
-        T_seq = 20,
-        B = 8,
-        embed_dim = 32,
-        num_heads = 4,
-    ),
-    "medium" => (
-        T_seq = 100,
-        B = 32,
-        embed_dim = 64,
-        num_heads = 4,
-    ),
+    "small" => (T_seq = 20, B = 8, embed_dim = 32, num_heads = 4),
+    "medium" => (T_seq = 100, B = 32, embed_dim = 64, num_heads = 4),
+    "large" => (T_seq = 200, B = 64, embed_dim = 128, num_heads = 8),
 )
 
 function make_attention_problem(;
@@ -40,7 +31,7 @@ end
 
 function build_suite!(preset::String)
     haskey(PRESETS, preset) ||
-        throw(ArgumentError("unknown preset: $preset. Use small or medium."))
+        throw(ArgumentError("unknown preset: $preset. Use small, medium, or large."))
 
     cfg = PRESETS[preset]
 
