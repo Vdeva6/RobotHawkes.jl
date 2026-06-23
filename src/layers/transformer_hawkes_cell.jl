@@ -10,8 +10,8 @@ Inputs:
 Output:
 - tensor with shape `(embed_dim, T, B)`
 
-This implementation avoids array mutation so that Zygote can differentiate
-through the attention computation.
+This implementation uses batched matrix multiplication instead of constructing
+each attention head with nested `map`/`hcat`/`vcat` calls.
 """
 struct TransformerHawkesCell{T<:AbstractFloat} <: Lux.AbstractLuxLayer
     embed_dim::Int
@@ -66,51 +66,44 @@ function _linear_project(W, b, x::AbstractArray{<:AbstractFloat, 3})
     return reshape(y2, E, T_seq, B)
 end
 
-function _hawkes_head_attention(
-    layer::TransformerHawkesCell,
-    q,
-    k,
-    v,
-    times,
-    decay_h,
-    b::Integer,
-    h::Integer,
-)
-    D = layer.head_dim
-    offset = (h - 1) * D
-    T_seq = size(q, 2)
+function _split_heads(z::AbstractArray{<:AbstractFloat, 3}, D::Integer, H::Integer)
+    E, T_seq, B = size(z)
 
-    S = promote_type(eltype(q), eltype(times), eltype(decay_h))
-    scale = inv(sqrt(S(D)))
-    decay_abs = abs(S(decay_h))
+    E == D * H ||
+        throw(DimensionMismatch("embed_dim must equal head_dim * num_heads"))
 
-    cols = map(1:T_seq) do t
-        scores = map(1:t) do s
-            dot_qk = sum(
-                S(q[offset + d, t, b]) * S(k[offset + d, s, b])
-                for d in 1:D
-            )
+    # Input:  (E, T, B)
+    # Output: (D, T, H, B)
+    return permutedims(reshape(z, D, H, T_seq, B), (1, 3, 2, 4))
+end
 
-            Δ = max(S(times[t, b] - times[s, b]), zero(S))
-            hawkes_mask = exp(-decay_abs * Δ)
+function _merge_heads(z::AbstractArray{<:AbstractFloat, 4})
+    # Input:  (D, T, H, B)
+    # Output: (D * H, T, B)
+    D, T_seq, H, B = size(z)
 
-            dot_qk * scale * hawkes_mask
-        end
+    return reshape(permutedims(z, (1, 3, 2, 4)), D * H, T_seq, B)
+end
 
-        max_score = maximum(scores)
-        weights_unnorm = exp.(scores .- max_score)
-        weights = weights_unnorm ./ sum(weights_unnorm)
+function _causal_mask(T_seq::Integer, ::Type{S}) where {S<:AbstractFloat}
+    neg_inf = -S(Inf)
 
-        [
-            sum(
-                weights[s] * S(v[offset + d, s, b])
-                for s in 1:t
-            )
-            for d in 1:D
-        ]
-    end
+    # rows = source index s
+    # cols = target/query index t
+    return [
+        s <= t ? zero(S) : neg_inf
+        for s in 1:T_seq, t in 1:T_seq
+    ]
+end
 
-    return hcat(cols...)
+function _time_deltas(times::AbstractMatrix{<:AbstractFloat}, ::Type{S}) where {S<:AbstractFloat}
+    T_seq, B = size(times)
+
+    # Δ[s, t, b] = max(times[t, b] - times[s, b], 0)
+    return [
+        max(S(times[t, b] - times[s, b]), zero(S))
+        for s in 1:T_seq, t in 1:T_seq, b in 1:B
+    ]
 end
 
 function (layer::TransformerHawkesCell)(
@@ -128,20 +121,62 @@ function (layer::TransformerHawkesCell)(
         throw(DimensionMismatch("times must have shape (T, B) matching x"))
 
     H = layer.num_heads
+    D = layer.head_dim
+
+    S = promote_type(eltype(x), eltype(times), eltype(ps.Wq))
 
     q = _linear_project(ps.Wq, ps.bq, x)
     k = _linear_project(ps.Wk, ps.bk, x)
     v = _linear_project(ps.Wv, ps.bv, x)
 
-    batches = map(1:B) do b
-        heads = map(1:H) do h
-            _hawkes_head_attention(layer, q, k, v, times, ps.decay[h], b, h)
-        end
+    # (E, T, B) -> (D, T, H, B)
+    qh = _split_heads(q, D, H)
+    kh = _split_heads(k, D, H)
+    vh = _split_heads(v, D, H)
 
-        reduce(vcat, heads)
-    end
+    # Collapse heads and batch into one batched dimension:
+    # (D, T, H, B) -> (D, T, H * B)
+    qn = reshape(qh, D, T_seq, H * B)
+    kn = reshape(kh, D, T_seq, H * B)
+    vn = reshape(vh, D, T_seq, H * B)
 
-    y_heads = cat(batches...; dims=3)
+    # Content attention:
+    # KᵀQ gives (source_time, target_time, head_batch)
+    kt = permutedims(kn, (2, 1, 3))
+    content_scores = NNlib.batched_mul(kt, qn) .* inv(sqrt(S(D)))
+
+    # Hawkes decay mask:
+    # Δ has shape (source_time, target_time, batch)
+    Δ = _time_deltas(times, S)
+
+    # Expand to (source_time, target_time, head, batch)
+    Δ4 = reshape(Δ, T_seq, T_seq, 1, B)
+    decay4 = reshape(abs.(S.(ps.decay)), 1, 1, H, 1)
+
+    hawkes_mask4 = exp.(-decay4 .* Δ4)
+
+    # Collapse to match content_scores:
+    # (T, T, H, B) -> (T, T, H * B)
+    hawkes_mask = reshape(hawkes_mask4, T_seq, T_seq, H * B)
+
+    # Causal mask:
+    causal = reshape(_causal_mask(T_seq, S), T_seq, T_seq, 1)
+
+    # Final attention scores:
+    # content is modulated by Hawkes decay, then future positions are masked.
+    scores = content_scores .* hawkes_mask .+ causal
+
+    # Softmax across source positions for each target position.
+    weights = NNlib.softmax(scores; dims=1)
+
+    # Weighted value aggregation:
+    # V * attention_weights -> (D, T, H * B)
+    yn = NNlib.batched_mul(vn, weights)
+
+    # Restore shape:
+    # (D, T, H * B) -> (D, T, H, B) -> (E, T, B)
+    yh = reshape(yn, D, T_seq, H, B)
+    y_heads = _merge_heads(yh)
 
     y = _linear_project(ps.Wo, ps.bo, y_heads)
 
