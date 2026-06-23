@@ -1,7 +1,19 @@
 name = "RobotHawkes"
 uuid = "5191ed55-fddd-4f40-a6da-1fdef83dab63"
-authors = ["Vikram Devaraju"]
 version = "0.1.0"
+authors = ["Vikram Devaraju"]
+
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Lux = "b2108857-7c20-44ae-9111-449ecde12c47"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+
+[compat]
+LinearAlgebra = "1.12.0"
+Lux = "1.31.4"
+Random = "1.11.0"
+Statistics = "1.11.1"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

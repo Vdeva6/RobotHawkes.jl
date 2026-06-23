@@ -1,13 +1,10 @@
 module RobotHawkes
 
+using Lux
+using Random
 
-export hello
+include("layers/temporal_embedding.jl")
 
-"""
-    hello()
-
-Temporary package sanity-check function.
-"""
-hello() = "RobotHawkes.jl is ready."
+export TemporalEmbedding
 
 end # module RobotHawkes
