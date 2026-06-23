@@ -13,6 +13,7 @@ include("models/transformer_hawkes_model.jl")
 include("losses/loglikelihood.jl")
 include("integration/intensity_integral.jl")
 include("rules/hawkes_attention_rrule.jl")
+include("rules/loss_rrules.jl")
 
 export TemporalEmbedding
 export EventEmbedding

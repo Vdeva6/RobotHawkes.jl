@@ -241,4 +241,5 @@ using RobotHawkes
     include("layers/test_hawkes_attention_gradients.jl")
     include("layers/test_hawkes_attention_manual_backward.jl")
     include("layers/test_hawkes_attention_rrule.jl")
+    include("losses/test_loss_rrules.jl")
 end
