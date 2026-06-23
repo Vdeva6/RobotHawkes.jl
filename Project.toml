@@ -1,0 +1,10 @@
+name = "RobotHawkes"
+uuid = "5191ed55-fddd-4f40-a6da-1fdef83dab63"
+authors = ["Vikram Devaraju"]
+version = "0.1.0"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

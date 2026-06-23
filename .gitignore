@@ -1,0 +1,72 @@
+# Julia package/build artifacts
+*.ji
+*.so
+*.dylib
+*.dll
+*.dSYM/
+*.cov
+*.mem
+*.jl.cov
+
+# Julia environment artifacts
+Manifest.toml
+
+# Keep Manifest.toml ignored for library/package development.
+# If this becomes an application or paper artifact, consider committing Manifest.toml.
+
+# Julia coverage
+coverage/
+lcov.info
+
+# Package compiler / sysimage artifacts
+*.a
+*.o
+*.bc
+*.native
+*.sysimage
+
+# Benchmark outputs
+benchmark/results/
+benchmark/*.json
+benchmark/*.csv
+benchmark/*.txt
+benchmark/*.html
+
+# Logs
+*.log
+logs/
+
+# Jupyter notebooks and checkpoints
+.ipynb_checkpoints/
+*.ipynb
+
+# Python baseline artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Data and generated experiment outputs
+data/
+artifacts/
+outputs/
+checkpoints/
+models/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+tmp/
+temp/
