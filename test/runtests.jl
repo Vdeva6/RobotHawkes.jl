@@ -237,4 +237,5 @@ using RobotHawkes
         @test val ≈ 1 / 3 atol = 1e-5
     end
     include("layers/test_transformer_hawkes_cell.jl")
+    include("layers/test_hawkes_attention_reference.jl")
 end
