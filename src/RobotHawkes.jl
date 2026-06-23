@@ -5,6 +5,7 @@ using Random
 using NNlib
 using Integrals
 using ChainRulesCore
+using LinearAlgebra
 
 include("layers/temporal_embedding.jl")
 include("layers/event_embedding.jl")
