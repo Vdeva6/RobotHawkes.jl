@@ -1,4 +1,6 @@
 # Custom reverse-mode rule scaffold for `_hawkes_attention`.
+# See `docs/hawkes_attention_backward.md` for the full backward derivation.
+#
 #
 # This file is intentionally disabled for now.
 #
